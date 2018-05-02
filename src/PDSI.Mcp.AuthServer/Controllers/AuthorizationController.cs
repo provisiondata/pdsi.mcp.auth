@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Security.Claims;
 using System.Threading.Tasks;
 using AspNet.Security.OpenIdConnect.Extensions;
 using AspNet.Security.OpenIdConnect.Primitives;
@@ -18,7 +19,6 @@ using PDSI.Mcp.AuthServer.Models;
 using PDSI.Mcp.AuthServer.ViewModels.Authorization;
 using PDSI.Mcp.AuthServer.ViewModels.Shared;
 
-// For more information on enabling Web API for empty projects, visit http://go.microsoft.com/fwlink/?LinkID=397860
 namespace PDSI.Mcp.AuthServer.Controllers
 {
     public class AuthorizationController : Controller
@@ -136,38 +136,17 @@ namespace PDSI.Mcp.AuthServer.Controllers
 
             if (request.IsAuthorizationCodeGrantType())
             {
-                // Retrieve the claims principal stored in the authorization code.
-                var info = await HttpContext.AuthenticateAsync(OpenIdConnectServerDefaults.AuthenticationScheme);
+                return await HandleAuthorizationCodeGrantTypeAsync(request);
+            }
 
-                // Retrieve the user profile corresponding to the authorization code.
-                // Note: if you want to automatically invalidate the authorization code
-                // when the user password/roles change, use the following line instead:
-                // var user = _signInManager.ValidateSecurityStampAsync(info.Principal);
-                var user = await _userManager.GetUserAsync(info.Principal);
-                if (user == null)
-                {
-                    return BadRequest(new OpenIdConnectResponse
-                    {
-                        Error = OpenIdConnectConstants.Errors.InvalidGrant,
-                        ErrorDescription = "The authorization code is no longer valid."
-                    });
-                }
+            if (request.IsPasswordGrantType())
+            {
+                return await HandlePasswordGrantTypeAsync(request);
+            }
 
-                // Ensure the user is still allowed to sign in.
-                if (!await _signInManager.CanSignInAsync(user))
-                {
-                    return BadRequest(new OpenIdConnectResponse
-                    {
-                        Error = OpenIdConnectConstants.Errors.InvalidGrant,
-                        ErrorDescription = "The user is no longer allowed to sign in."
-                    });
-                }
-
-                // Create a new authentication ticket, but reuse the properties stored
-                // in the authorization code, including the scopes originally granted.
-                var ticket = await CreateTicketAsync(request, user, info.Properties);
-
-                return SignIn(ticket.Principal, ticket.Properties, ticket.AuthenticationScheme);
+            if (request.IsClientCredentialsGrantType())
+            {
+                return await HandleClientCredentialsGrantTypeAsync(request);
             }
 
             return BadRequest(new OpenIdConnectResponse
@@ -175,6 +154,121 @@ namespace PDSI.Mcp.AuthServer.Controllers
                 Error = OpenIdConnectConstants.Errors.UnsupportedGrantType,
                 ErrorDescription = "The specified grant type is not supported."
             });
+        }
+
+        private async Task<IActionResult> HandleClientCredentialsGrantTypeAsync(OpenIdConnectRequest request)
+        {
+            // Note: the client credentials are automatically validated by OpenIddict:
+            // if client_id or client_secret are invalid, this action won't be invoked.
+
+            var application = await _applicationManager.FindByClientIdAsync(request.ClientId, HttpContext.RequestAborted);
+            if (application == null)
+            {
+                return BadRequest(new OpenIdConnectResponse
+                {
+                    Error = OpenIdConnectConstants.Errors.InvalidClient,
+                    ErrorDescription = "The client application was not found in the database."
+                });
+            }
+
+            // Create a new authentication ticket.
+            var ticket = CreateTicket(request, application);
+
+            return SignIn(ticket.Principal, ticket.Properties, ticket.AuthenticationScheme);
+        }
+
+        private AuthenticationTicket CreateTicket(OpenIdConnectRequest request, OpenIddictApplication application)
+        {
+            // Create a new ClaimsIdentity containing the claims that
+            // will be used to create an id_token, a token or a code.
+            var identity = new ClaimsIdentity(
+                OpenIdConnectServerDefaults.AuthenticationScheme,
+                OpenIdConnectConstants.Claims.Name,
+                OpenIdConnectConstants.Claims.Role);
+
+            // Use the client_id as the subject identifier.
+            identity.AddClaim(OpenIdConnectConstants.Claims.Subject, application.ClientId,
+                OpenIdConnectConstants.Destinations.AccessToken,
+                OpenIdConnectConstants.Destinations.IdentityToken);
+
+            identity.AddClaim(OpenIdConnectConstants.Claims.Name, application.DisplayName,
+                OpenIdConnectConstants.Destinations.AccessToken,
+                OpenIdConnectConstants.Destinations.IdentityToken);
+
+            // Create a new authentication ticket holding the user identity.
+            var ticket = new AuthenticationTicket(
+                new ClaimsPrincipal(identity),
+                new AuthenticationProperties(),
+                OpenIdConnectServerDefaults.AuthenticationScheme);
+
+            ticket.SetResources("resource_server");
+
+            return ticket;
+        }
+
+        private async Task<IActionResult> HandlePasswordGrantTypeAsync(OpenIdConnectRequest request)
+        {
+            var user = await _userManager.FindByNameAsync(request.Username);
+            if (user == null)
+            {
+                return BadRequest(new OpenIdConnectResponse
+                {
+                    Error = OpenIdConnectConstants.Errors.InvalidGrant,
+                    ErrorDescription = "The username/password couple is invalid."
+                });
+            }
+
+            // Validate the username/password parameters and ensure the account is not locked out.
+            var result = await _signInManager.CheckPasswordSignInAsync(user, request.Password, lockoutOnFailure: true);
+            if (!result.Succeeded)
+            {
+                return BadRequest(new OpenIdConnectResponse
+                {
+                    Error = OpenIdConnectConstants.Errors.InvalidGrant,
+                    ErrorDescription = "The username/password couple is invalid."
+                });
+            }
+
+            // Create a new authentication ticket.
+            var ticket = await CreateTicketAsync(request, user);
+
+            return SignIn(ticket.Principal, ticket.Properties, ticket.AuthenticationScheme);
+        }
+
+        private async Task<IActionResult> HandleAuthorizationCodeGrantTypeAsync(OpenIdConnectRequest request)
+        {
+            // Retrieve the claims principal stored in the authorization code.
+            var info = await HttpContext.AuthenticateAsync(OpenIdConnectServerDefaults.AuthenticationScheme);
+
+            // Retrieve the user profile corresponding to the authorization code.
+            // Note: if you want to automatically invalidate the authorization code
+            // when the user password/roles change, use the following line instead:
+            // var user = _signInManager.ValidateSecurityStampAsync(info.Principal);
+            var user = await _userManager.GetUserAsync(info.Principal);
+            if (user == null)
+            {
+                return BadRequest(new OpenIdConnectResponse
+                {
+                    Error = OpenIdConnectConstants.Errors.InvalidGrant,
+                    ErrorDescription = "The authorization code is no longer valid."
+                });
+            }
+
+            // Ensure the user is still allowed to sign in.
+            if (!await _signInManager.CanSignInAsync(user))
+            {
+                return BadRequest(new OpenIdConnectResponse
+                {
+                    Error = OpenIdConnectConstants.Errors.InvalidGrant,
+                    ErrorDescription = "The user is no longer allowed to sign in."
+                });
+            }
+
+            // Create a new authentication ticket, but reuse the properties stored
+            // in the authorization code, including the scopes originally granted.
+            var ticket = await CreateTicketAsync(request, user, info.Properties);
+
+            return SignIn(ticket.Principal, ticket.Properties, ticket.AuthenticationScheme);
         }
 
         private async Task<AuthenticationTicket> CreateTicketAsync(

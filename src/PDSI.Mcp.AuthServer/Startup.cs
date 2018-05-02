@@ -87,6 +87,7 @@ namespace PDSI.Mcp.AuthServer
 
                 options.AllowAuthorizationCodeFlow();
                 options.AllowPasswordFlow();
+                options.AllowClientCredentialsFlow();
 
                 // When request caching is enabled, authorization and logout requests
                 // are stored in the distributed cache by OpenIddict and the user agent
@@ -117,7 +118,6 @@ namespace PDSI.Mcp.AuthServer
                     options.ConsumerKey = "6XaCTaLbMqfj6ww3zvZ5g";
                     options.ConsumerSecret = "Il2eFzGIrYhz6BWjYhVXBPQSfZuS4xoHpSSyD9PI";
                 })
-
                 .AddOAuthValidation();
 
             // If you prefer using JWT, don't forget to disable the automatic
